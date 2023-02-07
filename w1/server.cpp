@@ -5,38 +5,94 @@
 #include <cstring>
 #include <cstdio>
 #include <iostream>
+#include <unordered_map>
+#include <chrono>
 #include "socket_tools.h"
+#include "protocol.h"
+
 
 int main(int argc, const char **argv)
 {
-  const char *port = "2022";
+  const char *sport = "2023";
+  const char *rport = "2022";
 
-  int sfd = create_dgram_socket(nullptr, port, nullptr);
+  addrinfo resAddrInfo;
+  int rfd = create_dgram_socket(nullptr, rport, nullptr);
+  int sfd = create_dgram_socket("localhost", sport, &resAddrInfo);
 
-  if (sfd == -1)
+  if (sfd == -1 || rfd == -1)
     return 1;
   printf("listening!\n");
+
+  // Remember clients and their last keep alive time
+  std::unordered_map<mid_t, std::chrono::high_resolution_clock::time_point> clients;
+
+  int newClientId = 1;
 
   while (true)
   {
     fd_set readSet;
     FD_ZERO(&readSet);
-    FD_SET(sfd, &readSet);
+    FD_SET(rfd, &readSet);
 
     timeval timeout = { 0, 100000 }; // 100 ms
-    select(sfd + 1, &readSet, NULL, NULL, &timeout);
+    select(rfd + 1, &readSet, NULL, NULL, &timeout);
+    const Message* msg = get_message(rfd, &readSet);
 
-
-    if (FD_ISSET(sfd, &readSet))
+    // Listen messages and verify clients
+    if (msg && msg->type == MessageType::Data)
     {
-      constexpr size_t buf_size = 1000;
-      static char buffer[buf_size];
-      memset(buffer, 0, buf_size);
+      const DefaultMessage* dmsg = reinterpret_cast<const DefaultMessage*>(msg);
+      printf("Message from client %d: %s\n",
+        dmsg->id, reinterpret_cast<const char*>(dmsg) + sizeof(DefaultMessage));
 
-      ssize_t numBytes = recvfrom(sfd, buffer, buf_size - 1, 0, nullptr, nullptr);
-      if (numBytes > 0)
-        printf("%s\n", buffer); // assume that buffer is a string
+      std::string answer = "OK";
+      auto clientIt = clients.find(dmsg->id);
+      if (clientIt == std::end(clients))
+      {
+        answer = "You did not open connection";
+      }
+      else
+      {
+        auto time = std::chrono::high_resolution_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>
+          (time - clientIt->second).count() > KEPP_ALIVE)
+        {
+          answer = "Your session is ended";
+        }
+      }
+      DefaultMessage message
+      {
+        .type = MessageType::Data,
+        .size = static_cast<msize_t>(answer.size()),
+        .id = 0u,
+      };
+
+      ssize_t res = send_message(sfd, &message, answer.c_str(), &resAddrInfo);
+      if (res == -1)
+        std::cout << strerror(errno) << std::endl;
     }
+
+    // Open 'connection' for new clients
+    if (msg && msg->type == MessageType::Handshake)
+    {
+      const HandshakeMessage *hmsg = reinterpret_cast<const HandshakeMessage*>(msg);
+      printf("Handshake from new client %d\n", newClientId);
+      clients[newClientId] = std::chrono::high_resolution_clock::now();
+      handshake(sfd, newClientId++, &resAddrInfo);
+    }
+
+    // Update connections if they are still active
+    if (msg && msg->type == MessageType::KeepAlive)
+    {
+      const HandshakeMessage *kmsg = reinterpret_cast<const HandshakeMessage*>(msg);
+      auto clientIt = clients.find(kmsg->id);
+      if (clientIt != std::end(clients))
+        clientIt->second = std::chrono::high_resolution_clock::now();
+
+      printf("KeepAlive from client %d\n", kmsg->id);
+    }
+
   }
   return 0;
 }
