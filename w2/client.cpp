@@ -1,93 +1,117 @@
 #include <enet/enet.h>
 #include <iostream>
+#include <future>
+#include <chrono>
+#include "utility.h"
+#include "client.h"
 
-void send_fragmented_packet(ENetPeer *peer)
-{
-  const char *baseMsg = "Stay awhile and listen. ";
-  const size_t msgLen = strlen(baseMsg);
-
-  const size_t sendSize = 2500;
-  char *hugeMessage = new char[sendSize];
-  for (size_t i = 0; i < sendSize; ++i)
-    hugeMessage[i] = baseMsg[i % msgLen];
-  hugeMessage[sendSize-1] = '\0';
-
-  ENetPacket *packet = enet_packet_create(hugeMessage, sendSize, ENET_PACKET_FLAG_RELIABLE);
-  enet_peer_send(peer, 0, packet);
-
-  delete[] hugeMessage;
-}
-
-void send_micro_packet(ENetPeer *peer)
-{
-  const char *msg = "dv/dt";
-  ENetPacket *packet = enet_packet_create(msg, strlen(msg) + 1, ENET_PACKET_FLAG_UNSEQUENCED);
-  enet_peer_send(peer, 1, packet);
-}
-
-int main(int argc, const char **argv)
+Client::Client()
 {
   if (enet_initialize() != 0)
   {
     printf("Cannot init ENet");
-    return 1;
   }
 
-  ENetHost *client = enet_host_create(nullptr, 1, 2, 0, 0);
-  if (!client)
+  host = enet_host_create(nullptr, 2, 2, 0, 0);
+  if (!host)
   {
-    printf("Cannot create ENet client\n");
-    return 1;
+    printf("Cannot create ENet host\n");
   }
 
   ENetAddress address;
   enet_address_set_host(&address, "localhost");
   address.port = 10887;
 
-  ENetPeer *lobbyPeer = enet_host_connect(client, &address, 2, 0);
+  lobbyPeer = enet_host_connect(host, &address, 2, 0);
   if (!lobbyPeer)
   {
     printf("Cannot connect to lobby");
-    return 1;
   }
+  asyncInput = std::async(std::launch::async, &Client::input, this);
+}
 
+Client::~Client()
+{
+  enet_host_destroy(host);
+  atexit(enet_deinitialize);
+}
+
+std::string Client::input()
+{
+  std::string res;
+  std::getline(std::cin, res);
+  return res;
+}
+
+void Client::sendRandom()
+{
+  std::srand(std::time(nullptr));
+  auto curTime = std::time(nullptr) - std::rand();
+  char buffer[100];
+  auto timeStr = std::asctime(std::localtime(&curTime));
+  int n = sprintf(buffer, "Time: %s", timeStr);
+  send_unreliable_packet(buffer, serverPeer, n - 1);
+}
+
+void Client::listen()
+{
   uint32_t timeStart = enet_time_get();
-  uint32_t lastFragmentedSendTime = timeStart;
-  uint32_t lastMicroSendTime = timeStart;
-  bool connected = false;
+  uint32_t lastRandomSendTime = timeStart;
   while (true)
   {
     ENetEvent event;
-    while (enet_host_service(client, &event, 10) > 0)
+    while (enet_host_service(host, &event, 10) > 0)
     {
       switch (event.type)
       {
       case ENET_EVENT_TYPE_CONNECT:
         printf("Connection with %x:%u established\n", event.peer->address.host, event.peer->address.port);
-        connected = true;
+        isLobbyConnected = true;
         break;
       case ENET_EVENT_TYPE_RECEIVE:
-        printf("Packet received '%s'\n", event.packet->data);
+      {
+        printf("Packet received '%s' from %x:%u\n", event.packet->data,
+          event.peer->address.host, event.peer->address.port);
+        char* msg = reinterpret_cast<char*>(event.packet->data);
+        if (msg && std::strncmp("Server: ", msg, strlen("Server: ")) == 0)
+        {
+          ENetAddress address;
+          sscanf(msg, "Server: %u:%hu", &address.host, &address.port);
+          serverPeer = enet_host_connect(host, &address, 2, 0);
+          isServerConnected = true;
+        };
         enet_packet_destroy(event.packet);
         break;
+      }
       default:
         break;
       };
     }
-    if (connected)
+    if (isLobbyConnected)
+    {
+      std::future_status status = asyncInput.wait_for((std::chrono::milliseconds(1)));
+      if (status == std::future_status::ready)
+      {
+        std::string inputStr = asyncInput.get();
+        send_reliable_packet(inputStr.c_str(), lobbyPeer, inputStr.length());
+        asyncInput = std::async(std::launch::async, &Client::input, this);
+      }
+    }
+    if (isServerConnected)
     {
       uint32_t curTime = enet_time_get();
-      if (curTime - lastFragmentedSendTime > 1000)
+      if (curTime - lastRandomSendTime > 10000)
       {
-        lastFragmentedSendTime = curTime;
-        send_fragmented_packet(lobbyPeer);
-      }
-      if (curTime - lastMicroSendTime > 100)
-      {
-        lastMicroSendTime = curTime;
-        send_micro_packet(lobbyPeer);
+        lastRandomSendTime = curTime;
+        sendRandom();
       }
     }
   }
+}
+
+int main(int argc, const char **argv)
+{
+  Client client;
+  client.listen();
   return 0;
 }
