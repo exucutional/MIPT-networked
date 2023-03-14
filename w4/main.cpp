@@ -8,38 +8,36 @@
 #include "protocol.h"
 
 
-static std::vector<Entity> entities;
-static uint16_t my_entity = invalid_entity;
+static std::unordered_map<uint16_t, Entity> entities;
+static uint16_t my_eid = invalid_entity;
 
 void on_new_entity_packet(ENetPacket *packet)
 {
   Entity newEntity;
   deserialize_new_entity(packet, newEntity);
-  // TODO: Direct adressing, of course!
-  for (const Entity &e : entities)
-    if (e.eid == newEntity.eid)
-      return; // don't need to do anything, we already have entity
-  entities.push_back(newEntity);
+  if (entities.find(newEntity.eid) == std::end(entities))
+    entities[newEntity.eid] = std::move(newEntity);
+
   printf("new entity\n");
 }
 
 void on_set_controlled_entity(ENetPacket *packet)
 {
-  deserialize_set_controlled_entity(packet, my_entity);
+  deserialize_set_controlled_entity(packet, my_eid);
 }
 
 void on_snapshot(ENetPacket *packet)
 {
   uint16_t eid = invalid_entity;
-  float x = 0.f; float y = 0.f;
-  deserialize_snapshot(packet, eid, x, y);
-  // TODO: Direct adressing, of course!
-  for (Entity &e : entities)
-    if (e.eid == eid)
-    {
-      e.x = x;
-      e.y = y;
-    }
+  float x = 0.f; float y = 0.f; size_t size = 0;
+  deserialize_snapshot(packet, eid, x, y, size);
+  if (entities.find(eid) != std::end(entities))
+  {
+    auto& e = entities[eid];
+    e.x = x;
+    e.y = y;
+    e.size = size;
+  }
 }
 
 int main(int argc, const char **argv)
@@ -68,8 +66,8 @@ int main(int argc, const char **argv)
     return 1;
   }
 
-  int width = 1920;
-  int height = 1080;
+  int width = 1920/2;
+  int height = 1080/2;
   InitWindow(width, height, "w6 AI MIPT");
 
   const int scrWidth = GetMonitorWidth(0);
@@ -116,38 +114,40 @@ int main(int argc, const char **argv)
           on_snapshot(event.packet);
           break;
         };
+        enet_packet_destroy(event.packet);
         break;
       default:
         break;
       };
     }
-    if (my_entity != invalid_entity)
+    if (my_eid != invalid_entity)
     {
       bool left = IsKeyDown(KEY_LEFT);
       bool right = IsKeyDown(KEY_RIGHT);
       bool up = IsKeyDown(KEY_UP);
       bool down = IsKeyDown(KEY_DOWN);
-      // TODO: Direct adressing, of course!
-      for (Entity &e : entities)
-        if (e.eid == my_entity)
-        {
-          // Update
-          e.x += ((left ? -dt : 0.f) + (right ? +dt : 0.f)) * 100.f;
-          e.y += ((up ? -dt : 0.f) + (down ? +dt : 0.f)) * 100.f;
+      if (entities.find(my_eid) != std::end(entities))
+      {
+        auto& e = entities[my_eid];
+        // Update
+        e.x += ((left ? -dt : 0.f) + (right ? +dt : 0.f)) * 100.f;
+        e.y += ((up ? -dt : 0.f) + (down ? +dt : 0.f)) * 100.f;
 
-          // Send
-          send_entity_state(serverPeer, my_entity, e.x, e.y);
-        }
+        // Send
+        send_entity_state(serverPeer, my_eid, e.x, e.y, e.size);
+      }
     }
 
 
     BeginDrawing();
       ClearBackground(GRAY);
       BeginMode2D(camera);
-        for (const Entity &e : entities)
+        for (auto& it : entities)
         {
-          const Rectangle rect = {e.x, e.y, 10.f, 10.f};
-          DrawRectangleRec(rect, GetColor(e.color));
+          auto& e = it.second;
+          //const Rectangle rect = {e.x, e.y, 10.f, 10.f};
+          DrawCircle(e.x, e.y, e.size, GetColor(e.color));
+          //DrawRectangleRec(rect, GetColor(e.color));
         }
 
       EndMode2D();

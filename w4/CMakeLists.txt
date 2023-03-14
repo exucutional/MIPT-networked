@@ -11,11 +11,17 @@ SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(W4_SOURCES
     main.cpp
     protocol.cpp
+    protocol.h
+    bitstream.h
     )
 
 set(W4_SERVER_SOURCES
     server.cpp
+    server.h
+    entity.h
     protocol.cpp
+    protocol.h
+    bitstream.h
     )
 
 
