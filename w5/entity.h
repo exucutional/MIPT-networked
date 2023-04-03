@@ -14,7 +14,7 @@ struct Entity
   float steer = 0.f;
 
   uint16_t eid = invalid_entity;
+  uint32_t tick = 0;
 };
 
 void simulate_entity(Entity &e, float dt);
-

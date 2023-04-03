@@ -1,59 +1,106 @@
 #include <enet/enet.h>
 #include <iostream>
-#include "entity.h"
-#include "protocol.h"
-#include "mathUtils.h"
 #include <stdlib.h>
 #include <vector>
 #include <map>
+#include <chrono>
+#include <thread>
+#include "entity.h"
+#include "protocol.h"
+#include "mathUtils.h"
+#include "server.h"
+#include "tick.h"
 
-static std::vector<Entity> entities;
-static std::map<uint16_t, ENetPeer*> controlledMap;
-
-void on_join(ENetPacket *packet, ENetPeer *peer, ENetHost *host)
+Entity Server::create_random_entity_()
 {
-  // send all entities
-  for (const Entity &ent : entities)
-    send_new_entity(peer, ent);
-
   // find max eid
-  uint16_t maxEid = entities.empty() ? invalid_entity : entities[0].eid;
-  for (const Entity &e : entities)
-    maxEid = std::max(maxEid, e.eid);
+  uint16_t maxEid = entities_.empty() ? 0 : entities_[0].eid;
+  for (const auto &[eid, e] : entities_)
+    maxEid = std::max(maxEid, eid);
   uint16_t newEid = maxEid + 1;
-  uint32_t color = 0xff000000 +
-                   0x00440000 * (rand() % 5) +
-                   0x00004400 * (rand() % 5) +
-                   0x00000044 * (rand() % 5);
+  uint32_t color = 0x000000ff +
+    ((rand() % 255) << 8) +
+    ((rand() % 255) << 16) +
+    ((rand() % 255) << 24);
   float x = (rand() % 4) * 5.f;
   float y = (rand() % 4) * 5.f;
-  Entity ent = {color, x, y, 0.f, (rand() / RAND_MAX) * 3.141592654f, 0.f, 0.f, newEid};
-  entities.push_back(ent);
+  Entity ent = { color, x, y, 0.f, (rand() / RAND_MAX) * 3.141592654f, 0.f, 0.f, newEid };
+  return ent;
+}
 
-  controlledMap[newEid] = peer;
+void Server::on_join_(ENetPeer *peer, ENetHost *host, uint32_t tick)
+{
+  // send all entities
+  for (const auto& [eid, e] : entities_)
+    send_new_entity(peer, e);
 
+  Entity ent = create_random_entity_();
+  ent.tick = tick;
+  entities_[ent.eid] = ent;
+
+  controlledMap_[ent.eid] = peer;
 
   // send info about new entity to everyone
   for (size_t i = 0; i < host->peerCount; ++i)
-    send_new_entity(&host->peers[i], ent);
+    if (host->peers[i].channels != nullptr)
+      send_new_entity(&host->peers[i], ent);
   // send info about controlled entity
-  send_set_controlled_entity(peer, newEid);
+  send_set_controlled_entity(peer, ent.eid);
 }
 
-void on_input(ENetPacket *packet)
+void Server::on_leave_(ENetPeer* peer, ENetHost* host)
+{
+  for (auto& [eid, cpeer] : controlledMap_)
+  {
+    if (cpeer == peer)
+    {
+      entities_.erase(eid);
+      for (size_t i = 0; i < host->peerCount; ++i)
+        for (size_t i = 0; i < host->peerCount; ++i)
+          if (host->peers[i].channels != nullptr)
+            send_leave(&host->peers[i], eid);
+    }
+  }
+}
+
+void Server::on_input_(ENetPacket *packet)
 {
   uint16_t eid = invalid_entity;
   float thr = 0.f; float steer = 0.f;
   deserialize_entity_input(packet, eid, thr, steer);
-  for (Entity &e : entities)
-    if (e.eid == eid)
-    {
-      e.thr = thr;
-      e.steer = steer;
-    }
+  auto &e = entities_[eid];
+  e.thr = thr;
+  e.steer = steer;
 }
 
-int main(int argc, const char **argv)
+void Server::on_snapshot_(ENetPacket* packet)
+{
+  uint16_t eid = invalid_entity;
+  float x = 0.f; float y = 0.f; float ori = 0.f; uint32_t tick = 0;
+  deserialize_snapshot(packet, eid, x, y, ori, tick);
+  auto& e = entities_[eid];
+  e.x = x;
+  e.y = y;
+  e.ori = ori;
+}
+
+void Server::simulate_(uint32_t time)
+{
+  for (auto& [eid, e] : entities_)
+  {
+    for (; e.tick < time_to_tick(time); ++e.tick)
+      simulate_entity(e, dt);
+ 
+    for (size_t i = 0; i < server_->peerCount; ++i)
+    {
+      ENetPeer* peer = &server_->peers[i];
+      if (peer->channels != nullptr)
+        send_snapshot(peer, E_SERVER_TO_CLIENT_SNAPSHOT, e.eid, e.x, e.y, e.ori, e.tick);
+    }
+  }
+}
+
+int Server::listen()
 {
   if (enet_initialize() != 0)
   {
@@ -65,22 +112,19 @@ int main(int argc, const char **argv)
   address.host = ENET_HOST_ANY;
   address.port = 10131;
 
-  ENetHost *server = enet_host_create(&address, 32, 2, 0, 0);
+  server_ = enet_host_create(&address, 32, 2, 0, 0);
 
-  if (!server)
+  if (!server_)
   {
     printf("Cannot create ENet server\n");
     return 1;
   }
 
-  uint32_t lastTime = enet_time_get();
   while (true)
   {
     uint32_t curTime = enet_time_get();
-    float dt = (curTime - lastTime) * 0.001f;
-    lastTime = curTime;
     ENetEvent event;
-    while (enet_host_service(server, &event, 0) > 0)
+    while (enet_host_service(server_, &event, 0) > 0)
     {
       switch (event.type)
       {
@@ -91,39 +135,37 @@ int main(int argc, const char **argv)
         switch (get_packet_type(event.packet))
         {
           case E_CLIENT_TO_SERVER_JOIN:
-            on_join(event.packet, event.peer, server);
+            on_join_(event.peer, server_, time_to_tick(curTime));
             break;
           case E_CLIENT_TO_SERVER_INPUT:
-            on_input(event.packet);
+            on_input_(event.packet);
+            break;
+          case E_CLIENT_TO_SERVER_SNAPSHOT:
+            on_snapshot_(event.packet);
             break;
         };
         enet_packet_destroy(event.packet);
+        break;
+      case ENET_EVENT_TYPE_DISCONNECT:
+        printf("Disconnect with %x:%u\n", event.peer->address.host, event.peer->address.port);
+        on_leave_(event.peer, server_);
         break;
       default:
         break;
       };
     }
-    static int t = 0;
-    for (Entity &e : entities)
-    {
-      // simulate
-      simulate_entity(e, dt);
-      // send
-      for (size_t i = 0; i < server->peerCount; ++i)
-      {
-        ENetPeer *peer = &server->peers[i];
-        // skip this here in this implementation
-        //if (controlledMap[e.eid] != peer)
-        send_snapshot(peer, e.eid, e.x, e.y, e.ori);
-      }
-    }
-    usleep(100000);
+    simulate_(curTime);
+    std::this_thread::sleep_for(std::chrono::microseconds(10000));
   }
 
-  enet_host_destroy(server);
+  enet_host_destroy(server_);
 
   atexit(enet_deinitialize);
   return 0;
 }
 
-
+int main(int argc, const char** argv)
+{
+  Server server;
+  return server.listen();
+}
