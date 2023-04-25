@@ -25,3 +25,4 @@ void deserialize_set_controlled_entity(ENetPacket *packet, uint16_t &eid);
 void deserialize_entity_input(ENetPacket *packet, uint16_t &eid, float &thr, float &steer);
 void deserialize_snapshot(ENetPacket *packet, uint16_t &eid, float &x, float &y, float &ori);
 
+void unit_test();

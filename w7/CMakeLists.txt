@@ -11,6 +11,10 @@ SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(W7_SOURCES
     main.cpp
     protocol.cpp
+    protocol.h
+    quantisation.h
+    mathUtils.h
+    bitstream.h
     )
 
 set(W7_SERVER_SOURCES
