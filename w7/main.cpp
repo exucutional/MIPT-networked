@@ -29,11 +29,11 @@ void on_set_controlled_entity(ENetPacket *packet)
   deserialize_set_controlled_entity(packet, my_entity);
 }
 
-void on_snapshot(ENetPacket *packet)
+void on_snapshot(ENetPacket *packet, ENetPeer *serverPeer)
 {
   uint16_t eid = invalid_entity;
   float x = 0.f; float y = 0.f; float ori = 0.f;
-  deserialize_snapshot(packet, eid, x, y, ori);
+  deserialize_snapshot(packet, serverPeer, eid, x, y, ori);
   // TODO: Direct adressing, of course!
   for (Entity &e : entities)
     if (e.eid == eid)
@@ -42,6 +42,11 @@ void on_snapshot(ENetPacket *packet)
       e.y = y;
       e.ori = ori;
     }
+}
+
+void on_input_ack(ENetPacket* packet)
+{
+  deserialize_entity_input_ack(packet);
 }
 
 int main(int argc, const char **argv)
@@ -94,6 +99,7 @@ int main(int argc, const char **argv)
   SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
 
   bool connected = false;
+  uint32_t frame = 0;
   while (!WindowShouldClose())
   {
     float dt = GetFrameTime();
@@ -117,9 +123,13 @@ int main(int argc, const char **argv)
           on_set_controlled_entity(event.packet);
           break;
         case E_SERVER_TO_CLIENT_SNAPSHOT:
-          on_snapshot(event.packet);
+          on_snapshot(event.packet, serverPeer);
+          break;
+        case E_SERVER_TO_CLIENT_INPUT_ACK:
+          on_input_ack(event.packet);
           break;
         };
+        enet_packet_destroy(event.packet);
         break;
       default:
         break;
@@ -140,10 +150,10 @@ int main(int argc, const char **argv)
           float steer = (left ? -1.f : 0.f) + (right ? 1.f : 0.f);
 
           // Send
-          send_entity_input(serverPeer, my_entity, thr, steer);
+          send_entity_input(serverPeer, my_entity, thr, steer, frame);
         }
     }
-
+    frame++;
     BeginDrawing();
       ClearBackground(GRAY);
       BeginMode2D(camera);

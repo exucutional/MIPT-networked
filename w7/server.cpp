@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <vector>
 #include <map>
+#include <thread>
+
+using namespace std::chrono_literals;
 
 static std::vector<Entity> entities;
 static std::map<uint16_t, ENetPeer*> controlledMap;
@@ -21,10 +24,10 @@ void on_join(ENetPacket *packet, ENetPeer *peer, ENetHost *host)
   for (const Entity &e : entities)
     maxEid = std::max(maxEid, e.eid);
   uint16_t newEid = maxEid + 1;
-  uint32_t color = 0xff000000 +
-                   0x00440000 * (rand() % 5) +
-                   0x00004400 * (rand() % 5) +
-                   0x00000044 * (rand() % 5);
+  uint32_t color = 0x000000ff +
+    ((rand() % 255) << 8) +
+    ((rand() % 255) << 16) +
+    ((rand() % 255) << 24);
   float x = (rand() % 4) * 5.f;
   float y = (rand() % 4) * 5.f;
   Entity ent = {color, x, y, 0.f, (rand() / RAND_MAX) * 3.141592654f, 0.f, 0.f, newEid};
@@ -35,22 +38,28 @@ void on_join(ENetPacket *packet, ENetPeer *peer, ENetHost *host)
 
   // send info about new entity to everyone
   for (size_t i = 0; i < host->peerCount; ++i)
-    send_new_entity(&host->peers[i], ent);
+    if (host->peers[i].channels != nullptr)
+      send_new_entity(&host->peers[i], ent);
   // send info about controlled entity
   send_set_controlled_entity(peer, newEid);
 }
 
-void on_input(ENetPacket *packet)
+void on_input(ENetPacket *packet, ENetPeer *peer)
 {
   uint16_t eid = invalid_entity;
   float thr = 0.f; float steer = 0.f;
-  deserialize_entity_input(packet, eid, thr, steer);
+  deserialize_entity_input(packet, peer, eid, thr, steer);
   for (Entity &e : entities)
     if (e.eid == eid)
     {
       e.thr = thr;
       e.steer = steer;
     }
+}
+
+void on_snapshot_ack(ENetPacket* packet, ENetPeer* peer)
+{
+  deserialize_snapshot_ack(packet, peer);
 }
 
 int main(int argc, const char **argv)
@@ -74,6 +83,7 @@ int main(int argc, const char **argv)
   }
 
   uint32_t lastTime = enet_time_get();
+  uint32_t frame = 0;
   while (true)
   {
     uint32_t curTime = enet_time_get();
@@ -94,7 +104,10 @@ int main(int argc, const char **argv)
             on_join(event.packet, event.peer, server);
             break;
           case E_CLIENT_TO_SERVER_INPUT:
-            on_input(event.packet);
+            on_input(event.packet, event.peer);
+            break;
+          case E_CLIENT_TO_SERVER_SNAPSHOT_ACK:
+            on_snapshot_ack(event.packet, event.peer);
             break;
         };
         enet_packet_destroy(event.packet);
@@ -111,13 +124,17 @@ int main(int argc, const char **argv)
       // send
       for (size_t i = 0; i < server->peerCount; ++i)
       {
-        ENetPeer *peer = &server->peers[i];
-        // skip this here in this implementation
-        //if (controlledMap[e.eid] != peer)
-        send_snapshot(peer, e.eid, e.x, e.y, e.ori);
+        if (server->peers[i].channels != nullptr)
+        {
+          ENetPeer *peer = &server->peers[i];
+          // skip this here in this implementation
+          //if (controlledMap[e.eid] != peer)
+          send_snapshot(peer, e.eid, e.x, e.y, e.ori, frame);
+        }
       }
     }
-    usleep(10000);
+    frame++;
+    std::this_thread::sleep_for(50ms);
   }
 
   enet_host_destroy(server);
